@@ -1,140 +1,240 @@
-#include "../include/Types.hpp"
-#include "../include/LockFreeRingBuffer.hpp"
+#include "../include/DatabentoHandler.hpp"
 #include <iostream>
-#include <thread>
-#include <random>
+#include <sstream>
+#include <stdexcept>
 #include <chrono>
-#include <iomanip>
 
 namespace market_data {
 
-/**
- * Each handler instance can run in its own thread for MPMC scenario
- */
-class DatabentoHandler {
-private:
-    LockFreeRingBuffer<MarketDataPoint, 65536>& buffer_;
-    std::atomic<bool> running_{false};
-    PerformanceMetrics& metrics_;
+// Constructor
+DatabentoHandler::DatabentoHandler(const std::string& api_key, size_t queue_size)
+    : data_queue_(std::make_unique<LockFreeRingBuffer<MarketDataPoint, 1024 * 1024>>()) {
     
-    // Base timestamp for delta calculations
-    const std::int64_t base_timestamp_;
+    try {
+        client_ = std::make_unique<databento::Historical>(
+            databento::Historical::Builder()
+                .SetKey(api_key)
+                .Build());
+    } catch (const std::exception& e) {
+        std::ostringstream oss;
+        oss << "Failed to create Databento client: " << e.what();
+        throw std::runtime_error(oss.str());
+    }
+}
+
+// Destructor
+DatabentoHandler::~DatabentoHandler() {
+    StopAsyncFetch();
+}
+
+// Create from environment
+std::unique_ptr<DatabentoHandler> DatabentoHandler::CreateFromEnv(size_t queue_size) {
+    return std::make_unique<DatabentoHandler>("", queue_size);
+}
+
+// Fetch historical BBO data
+bool DatabentoHandler::FetchHistoricalBBO(
+    const std::string& dataset,
+    const std::vector<std::string>& symbols,
+    const std::string& start_time,
+    const std::string& end_time,
+    const std::string& schema,
+    databento::SType stype_in) {
     
-    // Producer ID for differentiation
-    const int producer_id_;
-    
-    // Instrument configuration for this producer
-    struct InstrumentConfig {
-        std::int32_t id;
-        std::string symbol;
-        double base_price;
-        double last_bid;
-        double last_ask;
-    };
-    
-    std::vector<InstrumentConfig> instruments_;
-    
-public:
-    DatabentoHandler(LockFreeRingBuffer<MarketDataPoint, 65536>& buffer, 
-                     PerformanceMetrics& metrics, 
-                     int producer_id = 0,
-                     int num_instruments = 10)
-        : buffer_(buffer), metrics_(metrics), 
-          base_timestamp_(MarketDataPoint::current_timestamp_ns()),
-          producer_id_(producer_id) {
-        
-        // Initialize instruments for this producer
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_real_distribution<double> price_dist(50.0, 500.0);
-        
-        for (int i = 0; i < num_instruments; ++i) {
-            InstrumentConfig config;
-            config.id = producer_id * 1000 + i + 1;  // Unique IDs per producer
-            config.symbol = "SYM" + std::to_string(config.id);
-            config.base_price = price_dist(gen);
-            config.last_bid = config.base_price - 0.01;
-            config.last_ask = config.base_price + 0.01;
-            instruments_.push_back(config);
+    if (is_fetching_.load()) {
+        if (error_callback_) {
+            error_callback_("Already fetching data");
         }
+        return false;
     }
     
-    /**
-     * Start the market data feed for this producer.
-     * Multiple DatabentoHandler instances can run concurrently.
-     */
-    void start_feed() {
-        running_ = true;
+    is_fetching_ = true;
+    
+    try {
+        // Reset metrics for new fetch
+        metrics_.Reset();  // Explicitly reset the metrics object
         
-        std::cout << "Producer " << producer_id_ << " starting market data feed with " 
-                  << instruments_.size() << " instruments...\n";
+        databento::TsSymbolMap symbol_map;
+        auto decode_symbols = [&symbol_map](const databento::Metadata& metadata) {
+            symbol_map = metadata.CreateSymbolMap();
+        };
         
-        // Random number generation for realistic market data
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<> instrument_dist(0, instruments_.size() - 1);
-        std::normal_distribution<> price_change_dist(0.0, 0.001);  // Small price movements
-        std::exponential_distribution<> size_dist(1000.0);  // Order sizes
+        // Process each record
+        auto process_record = [this, &symbol_map, &dataset](const databento::Record& record) {
+            ProcessBBORecord(record, symbol_map, dataset);
+            return databento::KeepGoing::Continue;
+        };
         
+        // Determine schema enum
+        databento::Schema schema_enum;
+        if (schema == "bbo-1s") {
+            schema_enum = databento::Schema::Bbo1S;
+        } else if (schema == "bbo-1m") {
+            schema_enum = databento::Schema::Bbo1M;
+        } else {
+            std::ostringstream oss;
+            oss << "Unsupported schema: " << schema;
+            throw std::runtime_error(oss.str());
+        }
+        
+        // Fetch data
+            client_->TimeseriesGetRange(
+                dataset,
+                databento::DateTimeRange<std::string>{start_time, end_time},
+                symbols,
+                schema_enum,
+                stype_in,
+                databento::SType::InstrumentId,
+                0, // no limit
+                decode_symbols,
+                process_record
+            );
+        
+        is_fetching_ = false;
+        return true;
+        
+    } catch (const std::exception& e) {
+        is_fetching_ = false;
+        std::ostringstream oss;
+        oss << "Failed to fetch historical data: " << e.what();
+        if (error_callback_) {
+            error_callback_(oss.str());
+        }
+        return false;
+    }
+}
+
+// Start asynchronous fetch
+void DatabentoHandler::StartAsyncFetch(
+    const std::string& dataset,
+    const std::vector<std::string>& symbols,
+    const std::string& start_time,
+    const std::string& end_time,
+    const std::string& schema,
+    databento::SType stype_in) {
+    
+    if (is_fetching_.load()) {
+        if (error_callback_) {
+            error_callback_("Already fetching data");
+        }
+        return;
+    }
+    
+    // Stop any existing thread
+    StopAsyncFetch();
+    
+    // Start new thread
+    is_fetching_ = true;
+    fetch_thread_ = std::make_unique<std::thread>(
+        &DatabentoHandler::AsyncFetchWorker,
+        this,
+        dataset,
+        symbols,
+        start_time,
+        end_time,
+        schema,
+        stype_in
+    );
+}
+
+// Stop asynchronous fetch
+void DatabentoHandler::StopAsyncFetch() {
+    is_fetching_ = false;
+    
+    if (fetch_thread_ && fetch_thread_->joinable()) {
+        fetch_thread_->join();
+        fetch_thread_.reset();
+    }
+}
+
+// Process BBO record
+void DatabentoHandler::ProcessBBORecord(
+    const databento::Record& record,
+    const databento::TsSymbolMap& symbol_map,
+    const std::string& dataset) {
+    
+    // Get BBO message
+    if (auto* bbo_msg = record.GetIf<databento::Bbo1MMsg>()) {
+        
+        // Create MarketDataPoint
+        MarketDataPoint data_point;
+        
+        // Convert timestamp (ts_event is in nanoseconds since UNIX epoch)
+        data_point.timestamp_delta = bbo_msg->ts_recv.time_since_epoch().count();
+        
+        // Set instrument ID
+        data_point.instrument_id = bbo_msg->hd.instrument_id;
+        
+        // Convert bid/ask prices from fixed-point to double
+        data_point.bid_px = ConvertPrice(bbo_msg->levels[0].bid_px);
+        data_point.ask_px = ConvertPrice(bbo_msg->levels[0].ask_px);
+        
+        // Set bid/ask sizes
+        data_point.bid_sz = bbo_msg->levels[0].bid_sz;
+        data_point.ask_sz = bbo_msg->levels[0].ask_sz;
+        
+        // Try to push to queue
         auto start_time = std::chrono::high_resolution_clock::now();
-        std::size_t messages_sent = 0;
-        std::size_t failed_sends = 0;
         
-        while (running_) {
-            // Generate realistic message bursts (100-500 messages per batch)
-            auto messages_this_batch = std::uniform_int_distribution<>(100, 500)(gen);
+        if (data_queue_->try_push(data_point)) {
+            // Success - update metrics
+            metrics_.messages_received.fetch_add(1);
             
-            for (int i = 0; i < messages_this_batch && running_; ++i) {
-                MarketDataPoint mdp;
-                
-                // Select random instrument
-                auto& instrument = instruments_[instrument_dist(gen)];
-                mdp.instrument_id = instrument.id;
-                
-                // Generate price movement
-                double price_change = price_change_dist(gen);
-                instrument.last_bid += price_change;
-                instrument.last_ask = instrument.last_bid + 0.01;  // 1 cent spread
-                
-                mdp.bid_px = instrument.last_bid;
-                mdp.ask_px = instrument.last_ask;
-                mdp.bid_sz = static_cast<std::uint32_t>(size_dist(gen));
-                mdp.ask_sz = static_cast<std::uint32_t>(size_dist(gen));
-                mdp.timestamp_delta = MarketDataPoint::current_timestamp_ns() - base_timestamp_;
-                
-                // Attempt to push to MPMC queue
-                if (buffer_.try_push(mdp)) {
-                    messages_sent++;
-                    metrics_.messages_received.fetch_add(1);
-                } else {
-                    failed_sends++;
-                    metrics_.buffer_overruns.fetch_add(1);
-                }
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto latency_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count();
+            
+            metrics_.messages_processed.fetch_add(1);
+            metrics_.total_latency_ns.fetch_add(latency_ns);
+            
+            // Update max latency
+            uint64_t current_max = metrics_.max_latency_ns.load();
+            while (current_max < static_cast<uint64_t>(latency_ns) && 
+                   !metrics_.max_latency_ns.compare_exchange_weak(current_max, latency_ns)) {
+                // Retry if another thread updated max_latency_ns
             }
             
-            // Control message rate - aim for ~20k messages/second per producer
-            std::this_thread::sleep_for(std::chrono::microseconds(20));
+        } else {
+            // Queue full - increment overrun counter
+            metrics_.buffer_overruns.fetch_add(1);
+            
+            if (metrics_.buffer_overruns.load() % 1000 == 1) {
+                std::ostringstream oss;
+                oss << "Queue overrun detected. Queue utilization: " 
+                    << data_queue_->utilization() * 100.0 << "%";
+                if (error_callback_) {
+                    error_callback_(oss.str());
+                }
+            }
         }
-        
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            end_time - start_time).count();
-        
-        std::cout << "Producer " << producer_id_ << " stopped. Sent " << messages_sent 
-                  << " messages (failed: " << failed_sends << ") in " << duration << "ms\n";
     }
+}
+
+// Convert fixed-point price to double
+double DatabentoHandler::ConvertPrice(int64_t fixed_price) const {
+    if (fixed_price == UNDEF_PRICE) {
+        return 0.0;  // Undefined price
+    }
+    return static_cast<double>(fixed_price) / PRICE_SCALE;
+}
+
+// Async fetch worker
+void DatabentoHandler::AsyncFetchWorker(
+    const std::string& dataset,
+    const std::vector<std::string>& symbols,
+    const std::string& start_time,
+    const std::string& end_time,
+    const std::string& schema,
+    databento::SType stype_in) {
     
-    void stop_feed() {
-        running_ = false;
+    try {
+        FetchHistoricalBBO(dataset, symbols, start_time, end_time, schema, stype_in);
+    } catch (const std::exception& e) {
+        std::ostringstream oss;
+        oss << "Async fetch failed: " << e.what();
+        if (error_callback_) {
+            error_callback_(oss.str());
+        }
     }
-    
-    int get_producer_id() const {
-        return producer_id_;
-    }
-    
-    const std::vector<InstrumentConfig>& get_instruments() const {
-        return instruments_;
-    }
-};
+}
 
 } // namespace market_data

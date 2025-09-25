@@ -1,99 +1,139 @@
-// DatabentoHandler.hpp
 #pragma once
 
-#include "Types.hpp"
 #include "LockFreeRingBuffer.hpp"
-#include <databento.hpp>
+#include "Types.hpp"
+#include <databento/historical.hpp>
+#include <databento/dbn.hpp>
+#include <databento/symbol_map.hpp>
 #include <memory>
 #include <string>
-#include <vector>
-#include <atomic>
 #include <thread>
+#include <atomic>
 #include <functional>
-#include <chrono>
 
 namespace market_data {
 
-enum class DataMode {
-    HISTORICAL,
-    LIVE
-};
-
-struct DatabentoConfig {
-    std::string api_key;
-    std::vector<std::string> symbols;
-    std::string dataset = "XNAS.ITCH";  // Default to NASDAQ
-    databento::Schema schema = databento::Schema::Mbp1;
-    DataMode mode = DataMode::HISTORICAL;
-    
-    // Historical data parameters
-    std::string start_date;  // Format: "YYYY-MM-DD"
-    std::string end_date;    // Format: "YYYY-MM-DD"
-    
-    // Live data parameters
-    std::string live_gateway = "databento-equities-lsg";
-    
-    // Rate limiting for historical replay
-    uint64_t max_messages_per_second = 0;  // 0 = no limit
-};
-
+/**
+ * DatabentoHandler - Handles historical data fetching from Databento API
+ * and pushes MarketDataPoint objects to the MPMC lock-free queue.
+ * 
+ * Currently supports BBO (Best Bid Offer) schema for historical data.
+ */
 class DatabentoHandler {
-private:
-    DatabentoConfig config_;
-    std::unique_ptr<databento::Historical> historical_client_;
-    std::unique_ptr<databento::Live> live_client_;
-    
-    LockFreeRingBuffer<MarketDataPoint, 65536>* buffer_;
-    PerformanceMetrics* metrics_;
-    
-    std::atomic<bool> running_{false};
-    std::atomic<bool> connected_{false};
-    std::thread worker_thread_;
-    
-    // Symbol to instrument ID mapping
-    std::unordered_map<std::string, std::int32_t> symbol_to_id_;
-    std::int32_t next_instrument_id_ = 1;
-    
-    // Rate limiting for historical data
-    std::chrono::steady_clock::time_point last_message_time_;
-    std::chrono::nanoseconds message_interval_{0};
-    
-    // Convert Databento record to our format
-    MarketDataPoint convert_mbp1_record(const databento::MbpMsg& msg);
-    MarketDataPoint convert_trade_record(const databento::TradeMsg& msg);
-    
-    // Get or create instrument ID for symbol
-    std::int32_t get_instrument_id(const std::string& symbol);
-    
-    // Processing methods
-    void process_historical_data();
-    void process_live_data();
-    void handle_rate_limiting();
-    
-    // Error handling
-    void handle_databento_error(const std::exception& e);
-    
 public:
-    DatabentoHandler(const DatabentoConfig& config,
-                    LockFreeRingBuffer<MarketDataPoint, 65536>* buffer,
-                    PerformanceMetrics* metrics);
+    // Constructor with configuration
+    explicit DatabentoHandler(const std::string& api_key,
+                             size_t queue_size = 1024 * 1024);  // Default 1M buffer
     
+    // Destructor
     ~DatabentoHandler();
     
-    // Start data processing
-    bool start();
+    // Non-copyable
+    DatabentoHandler(const DatabentoHandler&) = delete;
+    DatabentoHandler& operator=(const DatabentoHandler&) = delete;
     
-    // Stop data processing
-    void stop();
+    /**
+     * Initialize the handler with API key from environment
+     */
+    static std::unique_ptr<DatabentoHandler> CreateFromEnv(size_t queue_size = 1024 * 1024);
     
-    // Check if handler is running
-    bool is_running() const { return running_.load(); }
-    bool is_connected() const { return connected_.load(); }
+    /**
+     * Fetch historical BBO data and push to queue
+     * 
+     * @param dataset The dataset to fetch from (e.g., "GLBX.MDP3")
+     * @param symbols List of symbols to fetch
+     * @param start_time Start time in ISO 8601 format
+     * @param end_time End time in ISO 8601 format
+     * @param schema BBO schema variant ("bbo-1s" or "bbo-1m")
+     * @param stype_in Symbol type for input (default: Parent)
+     * @return true if successful, false otherwise
+     */
+    bool FetchHistoricalBBO(
+        const std::string& dataset,
+        const std::vector<std::string>& symbols,
+        const std::string& start_time,
+        const std::string& end_time,
+        const std::string& schema = "bbo-1s",
+        databento::SType stype_in = databento::SType::Parent
+    );
     
-    // Get symbol mapping
-    const std::unordered_map<std::string, std::int32_t>& get_symbol_mapping() const {
-        return symbol_to_id_;
+    /**
+     * Start asynchronous data fetching in a separate thread
+     */
+    void StartAsyncFetch(
+        const std::string& dataset,
+        const std::vector<std::string>& symbols,
+        const std::string& start_time,
+        const std::string& end_time,
+        const std::string& schema = "bbo-1s",
+        databento::SType stype_in = databento::SType::Parent
+    );
+    
+    /**
+     * Stop asynchronous fetching
+     */
+    void StopAsyncFetch();
+    
+    /**
+     * Get access to the underlying queue for consumers
+     */
+    LockFreeRingBuffer<MarketDataPoint, 1024 * 1024>& GetQueue() { return *data_queue_; }
+    
+    /**
+     * Get performance metrics
+     */
+    const PerformanceMetrics& GetMetrics() const { return metrics_; }
+    
+    /**
+     * Check if handler is currently fetching data
+     */
+    bool IsFetching() const { return is_fetching_.load(); }
+    
+    /**
+     * Set callback for error handling
+     */
+    void SetErrorCallback(std::function<void(const std::string&)> callback) {
+        error_callback_ = callback;
     }
+    
+private:
+    /**
+     * Process BBO records and convert to MarketDataPoint
+     */
+    void ProcessBBORecord(
+        const databento::Record& record,
+        const databento::TsSymbolMap& symbol_map,
+        const std::string& dataset
+    );
+    
+    /**
+     * Convert Databento fixed-price to double
+     */
+    double ConvertPrice(int64_t fixed_price) const;
+    
+    /**
+     * Async fetch worker thread function
+     */
+    void AsyncFetchWorker(
+        const std::string& dataset,
+        const std::vector<std::string>& symbols,
+        const std::string& start_time,
+        const std::string& end_time,
+        const std::string& schema,
+        databento::SType stype_in
+    );
+    
+    // Member variables
+    std::unique_ptr<databento::Historical> client_;
+    std::unique_ptr<LockFreeRingBuffer<MarketDataPoint, 1024 * 1024>> data_queue_;
+    PerformanceMetrics metrics_;
+    std::atomic<bool> is_fetching_{false};
+    std::unique_ptr<std::thread> fetch_thread_;
+    std::function<void(const std::string&)> error_callback_;
+    
+    // Constants
+    static constexpr int64_t PRICE_SCALE = 1000000000LL;  // 1e9 for fixed-point conversion
+    static constexpr int64_t UNDEF_PRICE = 9223372036854775807LL;  // INT64_MAX
 };
 
 } // namespace market_data

@@ -49,6 +49,16 @@ struct PerformanceMetrics {
         if (received == 0) return 0.0;
         return 1.0 - (static_cast<double>(buffer_overruns.load()) / received);
     }
+
+    // Reset all metrics
+    void Reset() {
+        messages_received.store(0);
+        messages_processed.store(0);
+        total_latency_ns.store(0);
+        max_latency_ns.store(0);
+        buffer_overruns.store(0);
+        buffer_underruns.store(0);
+    }
 };
 
 #endif // TYPES_HPP
