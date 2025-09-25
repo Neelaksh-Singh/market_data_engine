@@ -29,7 +29,18 @@ DatabentoHandler::~DatabentoHandler() {
 
 // Create from environment
 std::unique_ptr<DatabentoHandler> DatabentoHandler::CreateFromEnv(size_t queue_size) {
-    return std::make_unique<DatabentoHandler>("", queue_size);
+    // Get API key from environment variable
+    const char* api_key_env = std::getenv("DATABENTO_API_KEY");
+    if (!api_key_env) {
+        throw std::runtime_error("DATABENTO_API_KEY environment variable not set");
+    }
+    
+    std::string api_key(api_key_env);
+    if (api_key.empty()) {
+        throw std::runtime_error("DATABENTO_API_KEY environment variable is empty");
+    }
+    
+    return std::make_unique<DatabentoHandler>(api_key, queue_size);
 }
 
 // Fetch historical BBO data
@@ -41,14 +52,14 @@ bool DatabentoHandler::FetchHistoricalBBO(
     const std::string& schema,
     databento::SType stype_in) {
     
-    if (is_fetching_.load()) {
-        if (error_callback_) {
-            error_callback_("Already fetching data");
-        }
-        return false;
-    }
+    // if (is_fetching_.load()) {
+    //     if (error_callback_) {
+    //         error_callback_("Already fetching data");
+    //     }
+    //     return false;
+    // }
     
-    is_fetching_ = true;
+    // is_fetching_ = true;
     
     try {
         // Reset metrics for new fetch
@@ -123,8 +134,7 @@ void DatabentoHandler::StartAsyncFetch(
     // Stop any existing thread
     StopAsyncFetch();
     
-    // Start new thread
-    is_fetching_ = true;
+    // Start new thread FIRST, then set the flag
     fetch_thread_ = std::make_unique<std::thread>(
         &DatabentoHandler::AsyncFetchWorker,
         this,
@@ -135,6 +145,9 @@ void DatabentoHandler::StartAsyncFetch(
         schema,
         stype_in
     );
+    
+    // Set flag after thread starts
+    is_fetching_ = true;
 }
 
 // Stop asynchronous fetch
@@ -227,6 +240,8 @@ void DatabentoHandler::AsyncFetchWorker(
     databento::SType stype_in) {
     
     try {
+        // Set fetching flag at the beginning of actual work
+        is_fetching_ = true;
         FetchHistoricalBBO(dataset, symbols, start_time, end_time, schema, stype_in);
     } catch (const std::exception& e) {
         std::ostringstream oss;
@@ -235,6 +250,9 @@ void DatabentoHandler::AsyncFetchWorker(
             error_callback_(oss.str());
         }
     }
+    
+    // Always set flag to false when done
+    is_fetching_ = false;
 }
 
 } // namespace market_data

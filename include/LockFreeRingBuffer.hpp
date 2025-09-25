@@ -11,8 +11,7 @@ namespace market_data {
 /**
  * Multi-Producer Multi-Consumer Lock-Free Queue
  * 
- * Maintains the same interface as the original LockFreeRingBuffer but now supports
- * multiple producers and consumers. Uses sequence numbers and CAS operations.
+ * Uses sequence numbers and CAS operations.
  * 
  * Template parameters:
  * - T: Type of elements to store (MarketDataPoint in our case)

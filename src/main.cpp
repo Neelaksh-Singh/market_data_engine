@@ -91,7 +91,7 @@ int main() {
         
         // Configuration for data fetch
         std::string dataset = "GLBX.MDP3";  // CME Globex MDP 3.0
-        std::vector<std::string> symbols = {"ESM2"};  // E-mini S&P 500 June 2022
+        std::vector<std::string> symbols = {"ES.FUT"};  // E-mini S&P 500 June 2022
         std::string start_time = "2022-06-10T14:30:00";
         std::string end_time = "2022-06-10T14:35:00";
         std::string schema = "bbo-1s";  // 1-second BBO
@@ -108,8 +108,16 @@ int main() {
         handler->StartAsyncFetch(dataset, symbols, start_time, end_time, schema);
         
         // Wait for fetch to complete or user interrupt
+        int wait_count = 0;
         while (handler->IsFetching() && running.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            wait_count++;
+            std::cout << "Waiting... " << wait_count << " seconds" << std::endl;
+            
+            if (wait_count > 30) { // Timeout after 30 seconds
+                std::cout << "Timeout waiting for data fetch" << std::endl;
+                break;
+            }
         }
         
         // If fetch completed, wait a bit more for consumer to process remaining data

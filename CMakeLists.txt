@@ -1,5 +1,4 @@
-# market_data_engine/CMakeLists.txt
-cmake_minimum_required(VERSION 3.24) # Matches Databento's example and allows modern features
+cmake_minimum_required(VERSION 3.24)
 project(MarketDataEngine LANGUAGES CXX)
 
 # Set C++ standard to C++17 or later for modern features and performance
@@ -23,7 +22,7 @@ include(FetchContent)
 
 # 1. Declare and make available ASIO (a header-only dependency of Databento)
 FetchContent_Declare(asio
-  GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+  GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git 
   GIT_TAG asio-1-28-0 
   CONFIGURE_COMMAND "" 
   BUILD_COMMAND ""     
@@ -41,7 +40,7 @@ endif()
 
 # 2. Declare and make available the main Databento library
 FetchContent_Declare(databento
-  GIT_REPOSITORY https://github.com/databento/databento-cpp
+  GIT_REPOSITORY https://github.com/databento/databento-cpp 
   GIT_TAG main 
 )
 
@@ -66,3 +65,4 @@ target_link_libraries(market_data_engine
         Threads::Threads     # Links the pthread library
         asio                 # Links our internally created ASIO target
 )
+
