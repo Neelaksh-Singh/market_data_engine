@@ -15,7 +15,7 @@ Low-latency system that consumes live market data from Databento, passes it thro
 ┌─────────────────┐    ┌──────────────────────┐    ┌─────────────────┐
 │   Databento     │    │   MPMC Lock-Free     │    │   Consumer      │
 │   Historical    │───▶│   Ring Buffer        │───▶│   Threads       │
-│   API           │    │   (1M capacity)      │    │                 │
+│   API           │    │   (1M capacity)      │    │  (VWAP + book)  │
 └─────────────────┘    └──────────────────────┘    └─────────────────┘
 ```
 
@@ -52,72 +52,47 @@ make -j$(nproc)
 ./market_engine_data
 ```
 
-## Usage
+## Configuration
 
-### Basic Example
+### Config File (`include/Config.hpp`)
 
-```cpp
-#include "DatabentoHandler.hpp"
+The system uses a header-only configuration file that allows easy customization of all parameters without recompilation of dependencies.
 
-using namespace market_data;
+### Configuration Options
 
-int main() {
-    // Create handler with API key from environment
-    auto handler = DatabentoHandler::CreateFromEnv();
-    
-    // Set error callback
-    handler->SetErrorCallback([](const std::string& error) {
-        std::cerr << "Error: " << error << std::endl;
-    });
-    
-    // Fetch historical BBO data
-    handler->FetchHistoricalBBO(
-        "GLBX.MDP3",                    // Dataset
-        {"ESM2", "NQM2"},              // Symbols
-        "2022-06-10T14:30:00",         // Start time
-        "2022-06-10T14:35:00",         // End time
-        "bbo-1s"                       // Schema (bbo-1s or bbo-1m)
-    );
-    
-    // Access the queue for processing
-    auto& queue = handler->GetQueue();
-    MarketDataPoint point;
-    
-    while (queue.try_pop(point)) {
-        // Process market data
-        process_market_data(point);
-    }
-    
-    return 0;
-}
-```
+#### Queue Parameters
+- **QUEUE_SIZE**: Ring buffer capacity (default: 1M messages)
 
-### Asynchronous Usage
+#### Databento Parameters
+- **DATASET**: Databento dataset (e.g., "GLBX.MDP3" for CME futures)
+- **SYMBOLS**: List of instruments to fetch (ES, NQ, YM futures)
+- **START_TIME/END_TIME**: Historical data time range (ISO format)
+- **SCHEMA**: Data schema ("bbo-1s" for 1-second BBO data)
+- **FETCH_TIMEOUT_SECONDS**: Maximum wait time for data fetch
 
-```cpp
-// Start async fetching
-handler->StartAsyncFetch(
-    "GLBX.MDP3",
-    {"ESM2"},
-    "2022-06-10T14:30:00",
-    "2022-06-10T14:35:00",
-    "bbo-1s"
-);
+#### Logging Parameters
+- **ENABLE_SAMPLE_OUTPUT**: Enable/disable sample data printing
+- **SAMPLE_PRINT_EVERY**: Print sample data every N messages
 
-// Process data in separate thread
-std::thread consumer([&queue]() {
-    MarketDataPoint point;
-    while (true) {
-        if (queue.try_pop(point)) {
-            // Process data point
-        }
-    }
-});
+### Environment Variables
 
-// Stop async fetch when done
-handler->StopAsyncFetch();
-consumer.join();
-```
+- `DATABENTO_API_KEY`: Your Databento API key (required)
+
+## Sample Output
+
+<div align="center">
+
+| Initial Processing | Performance Metrics |
+|:------------------:|:------------------:|
+| ![Initial Output](assets/o1.png) | ![Performance Report](assets/o2.png) |
+
+</div>
+
+The consumer thread processes market data and provides:
+- Real-time VWAP calculations per instrument
+- Sample data points every 1000 messages
+- Performance reports every 5 seconds
+- Final summary with complete statistics
 
 ## Data Structure
 
