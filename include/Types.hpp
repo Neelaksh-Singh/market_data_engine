@@ -63,4 +63,30 @@ struct PerformanceMetrics {
     }
 };
 
+// ================= VWAP Tracking ==================
+struct VWAPTracker {
+    double cum_px_qty{0.0};
+    double cum_qty{0.0};
+
+    void add(double price, double qty) {
+        cum_px_qty += price * qty;
+        cum_qty += qty;
+    }
+
+    double vwap() const {
+        return cum_qty > 0 ? cum_px_qty / cum_qty : 0.0;
+    }
+};
+
+// Holds per-instrument stats (VWAP + counters, extendable later)
+struct InstrumentStats {
+    VWAPTracker vwap_tracker;
+    uint64_t trades_processed{0};
+
+    void update(double price, double qty) {
+        vwap_tracker.add(price, qty);
+        trades_processed++;
+    }
+};
+
 #endif // TYPES_HPP
