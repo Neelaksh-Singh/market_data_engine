@@ -40,14 +40,16 @@ struct PerformanceMetrics {
     double avg_latency_us() const {
         auto processed = messages_processed.load();
         if (processed == 0) return 0.0;
-        return static_cast<double>(total_latency_ns.load()) / processed / 1000.0;
+        return static_cast<double>(total_latency_ns.load()) / static_cast<double>(processed) / 1000.0;
+
     }
     
     // Push success rate
     double push_success_rate() const {
         auto received = messages_received.load();
         if (received == 0) return 0.0;
-        return 1.0 - (static_cast<double>(buffer_overruns.load()) / received);
+        return 1.0 - (static_cast<double>(buffer_overruns.load()) / static_cast<double>(received));
+
     }
 
     // Reset all metrics

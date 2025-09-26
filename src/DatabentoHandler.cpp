@@ -9,6 +9,7 @@ namespace market_data {
 // Constructor
 DatabentoHandler::DatabentoHandler(const std::string& api_key, size_t queue_size)
     : data_queue_(std::make_unique<LockFreeRingBuffer<MarketDataPoint, 1024 * 1024>>()) {
+    (void)queue_size; 
     
     try {
         client_ = std::make_unique<databento::Historical>(
@@ -165,6 +166,9 @@ void DatabentoHandler::ProcessBBORecord(
     const databento::Record& record,
     const databento::TsSymbolMap& symbol_map,
     const std::string& dataset) {
+
+    (void)symbol_map;
+    (void)dataset;
     
     // Get BBO message
     if (auto* bbo_msg = record.GetIf<databento::Bbo1MMsg>()) {

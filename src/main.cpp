@@ -1,6 +1,7 @@
 #include "../include/DatabentoHandler.hpp"
 #include "../include/LockFreeRingBuffer.hpp"
 #include "../include/Types.hpp"
+#include "../include/Config.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -76,7 +77,7 @@ int main() {
     try {
         // Create Databento handler using environment variable for API key
         std::cout << "Creating Databento handler..." << std::endl;
-        auto handler = DatabentoHandler::CreateFromEnv();
+        auto handler = DatabentoHandler::CreateFromEnv(config::QUEUE_SIZE);
         
         // Set error callback
         handler->SetErrorCallback([](const std::string& error) {
@@ -90,12 +91,12 @@ int main() {
                            std::ref(handler->GetMetrics()));
         
         // Configuration for data fetch
-        std::string dataset = "GLBX.MDP3";  // CME Globex MDP 3.0
-        std::vector<std::string> symbols = {"ES.FUT"};  // E-mini S&P 500 June 2022
-        std::string start_time = "2022-06-10T14:30:00";
-        std::string end_time = "2022-06-10T14:35:00";
-        std::string schema = "bbo-1s";  // 1-second BBO
-        
+        std::string dataset = config::DATASET;
+        auto symbols        = config::SYMBOLS;
+        std::string start_time = config::START_TIME;
+        std::string end_time   = config::END_TIME;
+        std::string schema     = config::SCHEMA;
+                
         std::cout << "Fetching historical data..." << std::endl;
         std::cout << "Dataset: " << dataset << std::endl;
         std::cout << "Symbols: ";
@@ -114,7 +115,7 @@ int main() {
             wait_count++;
             std::cout << "Waiting... " << wait_count << " seconds" << std::endl;
             
-            if (wait_count > 30) { // Timeout after 30 seconds
+            if (wait_count > config::FETCH_TIMEOUT_SECONDS) { // Default timeout after 30 seconds
                 std::cout << "Timeout waiting for data fetch" << std::endl;
                 break;
             }
